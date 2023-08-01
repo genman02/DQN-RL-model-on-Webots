@@ -3,7 +3,19 @@ import operator
 import numpy as np
 from controller import Supervisor
 from Simulation.libraries.Evironment import *
+import random
 
+
+action_set = {
+            0: [0,300],
+            1: [45,300],
+            2: [90,300],
+            3: [135, 300],
+            4: [180, 300],
+            5: [225, 300],
+            6: [270, 300],
+            7: [315, 300],
+        }
 # Function to calculate the angle and distance between two points (x1,y1) and (x2,y2)
 def calculate_motion_vector(x1,y1,x2,y2):
     theta = math.degrees(math.atan2((y2-y1),(x2-x1)))
@@ -110,10 +122,18 @@ class RosBot(Supervisor):
 
         self.sensor_calibration()
 
+        # for RL
+        self.action_space = random.randint(0,7)
+        self.state = None
+        self.steps_beyond_terminated = None
+        self.previous_x = None
+        self.previous_y = None
+
     # Preforms one timestep to update all sensors should be used when initilizing robot and after teleport
     def sensor_calibration(self):
         while self.experiment_supervisor.step(self.timestep) != -1:
             break
+
     # Sets all motors speed to 0
     def stop(self):
         for motor in self.all_motors:
@@ -243,8 +263,91 @@ class RosBot(Supervisor):
         #         self.stop()
         #         break
 
-    # Supervisor Functions: allows robot to control the simulation
+    def get_observations(self):
+        frd = self.front_right_ds.getValue()
+        fld = self.front_left_ds.getValue()
+        rrd = self.rear_right_ds.getValue()
+        rld = self.rear_left_ds.getValue()
 
+        gps = self.gps.getValues()
+        x_position = gps[0]
+        y_position = gps[1]
+
+        range_image = self.lidar.getRangeImage()
+
+        print("LIDAR: {}".format(range_image))
+        print(gps)
+        self.state = [frd, fld, rrd, rld, x_position, y_position]
+        return np.array(self.state, dtype=np.float32)
+
+    def perform_action(self, action):
+        motion = action_set.get(action)
+        self.rotate_to(motion[0])
+        self.move_forward(motion[1])
+
+    def step(self, action):
+        self.perform_action(action)
+        range_image = self.lidar.getRangeImage()
+        terminated = None
+
+        frd = self.state[0]
+        fld = self.state[1]
+        rrd = self.state[2]
+        rld = self.state[3]
+
+        gps = self.gps.getValues()
+        current_x = gps[0]
+        current_y = gps[1]
+        print("########################################################################")
+        print("previous x position: {}".format(self.previous_x))
+        print("current x position: {}".format(current_x))
+        print("previous y position: {}".format(self.previous_y))
+        print("current y position: {}".format(current_y))
+        print("########################################################################")
+        if self.previous_x is not None or self.previous_y is not None:
+            if self.previous_x < current_x < 1:
+                reward = 3
+                if self.previous_y < current_y < 1.25:
+                    reward += 3
+            elif self.previous_y < current_y < 1.25:
+                reward = 3
+                if self.previous_x < current_x < 1:
+                    reward += 3
+            elif current_x == 1:
+                if current_y == 1.25:
+                    reward = 10
+                    terminated = True
+        self.previous_x = current_x
+        self.previous_y = current_y
+
+        if frd < 240:
+            self.perform_action(random.randint(0, 7))
+        elif fld < 240:
+            self.perform_action(random.randint(0, 7))
+        # elif rrd < 255:
+        #     self.perform_action(random.randint(0, 7))
+        # elif rld < 255:
+        #     self.perform_action(random.randint(0, 7))
+
+        for val in range(len(range_image)):
+            if range_image[val] < 0.28:
+                terminated = True
+                break
+
+        if not terminated:
+            reward = 1
+        elif self.steps_beyond_terminated is None:
+            self.steps_beyond_terminated = 0
+            reward = 1
+        else:
+            if self.steps_beyond_terminated == 0:
+                print("You are calling 'step()' even though this environment has already returned terminated = True.")
+            self.steps_beyond_terminated += 1
+            reward = 0
+
+        return np.array(self.state, dtype=np.float32), reward, terminated, False, {}
+
+    # Supervisor Functions: allows robot to control the simulation
     # Takes in a xml maze file and creates the walls, starting locations, and goal locations
     def load_environment(self,maze_file):
         self.maze = Maze(maze_file)
